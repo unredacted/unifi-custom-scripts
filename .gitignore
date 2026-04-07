@@ -1,0 +1,26 @@
+# Runtime artifacts (generated on-device, never committed)
+*.pid
+*.lock
+
+# Numbered symlinks/copies created by the orchestrator
+[0-9][0-9]-*
+
+# Legacy flat config files (superseded by conf/<hostname>.conf)
+inject-rules.conf
+custom-routes.conf
+on-boot-commands.conf
+
+# Logs
+*.log
+
+# Editor swap / backup files
+*.swp
+*.swo
+*~
+.*.swp
+
+# macOS
+.DS_Store
+
+# Keep the example conf even though conf/ entries are host-specific
+!conf/example.conf
