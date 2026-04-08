@@ -29,6 +29,19 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# -----------------------------------------------------------------
+# Mutual exclusion — prevent concurrent runs from racing.
+# ip rule add happily accepts duplicates, so two overlapping runs
+# can both see count=0 and both insert. flock serializes all
+# invocations (monitor-triggered or manual).
+# -----------------------------------------------------------------
+FLOCK_FILE="/var/run/inject-rules.lock"
+exec 9>"$FLOCK_FILE"
+if ! flock -w 30 9; then
+    echo "[ERROR] Could not acquire lock after 30s — another inject is stuck?"
+    exit 1
+fi
+
 # Config file resolution: explicit arg > conf/<hostname>.conf > inject-rules.conf > custom-routes.conf
 if [[ -n "${1:-}" ]]; then
     CONF="$1"

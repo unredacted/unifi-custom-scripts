@@ -211,28 +211,6 @@ get_first_iptables_check() {
     done < "$conf"
 }
 
-# Extract the first ebtables rule from config (for heartbeat verification)
-# Returns a delete-form command that exits 0 only if the rule exists
-get_first_ebtables_check() {
-    local conf="$1"
-
-    while IFS= read -r line; do
-        line="${line#"${line%%[![:space:]]*}"}"
-        line="${line%"${line##*[![:space:]]}"}"
-        [[ -z "$line" || "$line" == \#* ]] && continue
-
-        if [[ "$line" == ebtables\ * ]]; then
-            # We can't use -C, but we can list-and-grep the chain
-            local chain
-            chain="$(echo "$line" | sed -E 's/^ebtables\s+-[AI]\s+(\S+).*/\1/')"
-            local rule_body
-            rule_body="$(echo "$line" | sed -E 's/^ebtables\s+-[AI]\s+\S+\s+//')"
-            # Return a check command that greps the chain listing
-            echo "ebtables -L ${chain} --Lmac2 2>/dev/null | grep -qi '$(echo "$rule_body" | sed "s/'/'\\''/g")'"
-            return
-        fi
-    done < "$conf"
-}
 
 # -----------------------------------------------------------------
 # Gather all monitoring parameters
@@ -267,12 +245,13 @@ for dtype in "${DIRECTIVE_TYPES[@]}"; do
     esac
 done
 
-# Build iptables/ebtables check commands for heartbeat verification
+# Build iptables check command for heartbeat verification.
+# ebtables -L output format is unreliable for grep-based checks, but on
+# UBIOS a provisioning flush always hits both iptables and ebtables, so
+# checking iptables alone is sufficient as a proxy.
 IPTABLES_CHECK=""
-EBTABLES_CHECK=""
 if $WATCH_NETFILTER; then
     IPTABLES_CHECK="$(get_first_iptables_check "$CONF")"
-    EBTABLES_CHECK="$(get_first_ebtables_check "$CONF")"
 fi
 
 echo "[rules-monitor] Host: $(hostname)"
@@ -342,31 +321,16 @@ _monitor() {
 
     # ---- Netfilter heartbeat ----
     # iptables/ebtables have no kernel event channel, so we poll.
-    # We check if a known rule still exists; if not, trigger re-inject.
-    if $WATCH_NETFILTER; then
+    # We check if a known iptables rule still exists; if not, trigger
+    # re-inject.  An iptables flush on UBIOS implies ebtables was
+    # flushed too, so checking iptables alone is sufficient.
+    if $WATCH_NETFILTER && [[ -n "$IPTABLES_CHECK" ]]; then
         (
             sleep 10  # Give initial inject time to finish
             while true; do
                 sleep "$HEARTBEAT"
-
-                local missing=false
-
-                # Check iptables
-                if [[ -n "$IPTABLES_CHECK" ]]; then
-                    if ! eval "$IPTABLES_CHECK" 2>/dev/null; then
-                        missing=true
-                    fi
-                fi
-
-                # Check ebtables
-                if [[ -n "$EBTABLES_CHECK" ]] && ! $missing; then
-                    if ! eval "$EBTABLES_CHECK" 2>/dev/null; then
-                        missing=true
-                    fi
-                fi
-
-                if $missing; then
-                    echo "heartbeat: netfilter rule missing" > "$fifo" 2>/dev/null || exit 0
+                if ! eval "$IPTABLES_CHECK" 2>/dev/null; then
+                    echo "heartbeat: iptables rule missing" > "$fifo" 2>/dev/null || exit 0
                 fi
             done
         ) &
@@ -385,11 +349,14 @@ _monitor() {
         local event
         IFS= read -r event <&3 || break
 
-        # Self-trigger guard: if lockfile is fresh, this is our own event
+        # Self-trigger guard: lockfile contains the epoch when the last
+        # sync finished. If that's within COOLDOWN seconds, this event
+        # was caused by our own rule changes — drain and skip.
         if [[ -f "$LOCKFILE" ]]; then
-            local lock_age
-            lock_age=$(( $(date +%s) - $(stat -c %Y "$LOCKFILE" 2>/dev/null || echo 0) ))
-            if [[ "$lock_age" -lt "$COOLDOWN" ]]; then
+            local lock_epoch lock_age
+            lock_epoch=$(cat "$LOCKFILE" 2>/dev/null) || lock_epoch=0
+            lock_age=$(( $(date +%s) - lock_epoch ))
+            if [[ "$lock_age" -ge 0 && "$lock_age" -lt "$COOLDOWN" ]]; then
                 echo "[$(date)] Ignoring event during cooldown (${lock_age}s < ${COOLDOWN}s): $event" >> "$LOG"
                 # Drain queued events
                 while IFS= read -t "$DEBOUNCE" -r event <&3; do :; done
@@ -411,16 +378,16 @@ _monitor() {
             echo "[$(date)] Drained $drained more events during settle window" >> "$LOG"
         fi
 
-        # Create lockfile before running — rules-sync will generate
-        # route events that we need to ignore.
-        touch "$LOCKFILE"
+        # Write current epoch into lockfile before running — the inject
+        # script will generate route/rule events that we need to ignore.
+        date +%s > "$LOCKFILE"
 
         echo "[$(date)] Re-running $RULES_SCRIPT" >> "$LOG"
         "$RULES_SCRIPT" "$CONF" >> "$LOG" 2>&1 || true
 
-        # Refresh lockfile timestamp after script completes so the
-        # cooldown window starts from now.
-        touch "$LOCKFILE"
+        # Refresh epoch after script completes so the cooldown window
+        # starts from now.
+        date +%s > "$LOCKFILE"
     done
 
     # Cleanup
