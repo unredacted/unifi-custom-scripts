@@ -111,49 +111,48 @@ run_iptables() {
 }
 
 # -----------------------------------------------------------------
-# ebtables: check if a matching rule exists in the chain, then
-#           insert/append if missing.
+# ebtables: idempotent rule insertion.
 #
-# ebtables-legacy (v2.0.x) does not support -C (check), so we
-# list the chain and grep for the rule body. The output of
-# "ebtables -L <chain> --Lmac2" prints rules in a format that
-# closely matches the input arguments (minus "ebtables -A CHAIN").
+# ebtables-legacy (v2.0.x) does not support -C (check), and the
+# output of "ebtables -L" doesn't reliably match input arguments
+# (implicit protocol flags, whitespace, option reordering), making
+# string-matching fragile.
+#
+# Instead, we use -D (delete) which accepts the exact same argument
+# format as -A/-I. If deletion succeeds, the rule existed and we
+# re-add it. If deletion fails, the rule didn't exist and we just
+# add it. Either way, exactly one copy of the rule ends up in the
+# chain.
 # -----------------------------------------------------------------
 run_ebtables() {
     local cmd="$1"
 
-    # Extract the chain name (word after -A or -I)
-    local chain
-    chain="$(echo "$cmd" | sed -E 's/^ebtables\s+-[AI]\s+(\S+).*/\1/')"
+    # Build the delete command by swapping -A/-I with -D
+    local del_cmd
+    del_cmd="$(echo "$cmd" | sed -E 's/^(ebtables\s+)-[AI]/\1-D/')"
 
-    # Extract the rule body (everything after "ebtables -A/-I CHAIN ")
-    local rule_body
-    rule_body="$(echo "$cmd" | sed -E 's/^ebtables\s+-[AI]\s+\S+\s+//')"
+    # Also strip any positional index for -I (e.g. "ebtables -I CHAIN 1 ..."
+    # → the position is not valid for -D)
+    del_cmd="$(echo "$del_cmd" | sed -E 's/(-D\s+\S+)\s+[0-9]+/\1/')"
 
-    # Normalise to lowercase for comparison (MAC addresses vary in case)
-    local rule_lower
-    rule_lower="$(echo "$rule_body" | tr '[:upper:]' '[:lower:]')"
-
-    # Check existing rules in the chain
-    local found=0
-    while IFS= read -r line; do
-        local line_lower
-        line_lower="$(echo "$line" | tr '[:upper:]' '[:lower:]' | sed 's/^[[:space:]]*//')"
-        if [[ "$line_lower" == *"$rule_lower"* ]]; then
-            found=1
-            break
+    if eval "$del_cmd" 2>/dev/null; then
+        # Rule existed — re-add it to restore it
+        if eval "$cmd" 2>/dev/null; then
+            echo "  [EXISTS] $cmd"
+            inc EXISTED
+        else
+            echo "  [FAILED] $cmd (existed but re-add failed)"
+            inc FAILED
         fi
-    done < <(ebtables -L "$chain" --Lmac2 2>/dev/null)
-
-    if [[ "$found" -eq 1 ]]; then
-        echo "  [EXISTS] $cmd"
-        inc EXISTED
-    elif eval "$cmd" 2>/dev/null; then
-        echo "  [ADDED]  $cmd"
-        inc ADDED
     else
-        echo "  [FAILED] $cmd"
-        inc FAILED
+        # Rule did not exist — add it fresh
+        if eval "$cmd" 2>/dev/null; then
+            echo "  [ADDED]  $cmd"
+            inc ADDED
+        else
+            echo "  [FAILED] $cmd"
+            inc FAILED
+        fi
     fi
 }
 
