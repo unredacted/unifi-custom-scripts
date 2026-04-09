@@ -208,8 +208,8 @@ _count_matching_rules() {
     while IFS= read -r line; do
         # Strip the "NNN:\t" priority prefix from ip rule show output
         local body="${line#*:}"
-        # Collapse whitespace and trim
-        body="$(echo "$body" | tr -s ' ' | sed 's/^ //;s/ $//')"
+        # Collapse whitespace (including tabs from ip rule show) and trim
+        body="$(echo "$body" | tr -s '[:space:]' ' ' | sed 's/^ //;s/ $//')"
         if [[ "$body" == "$needle" ]]; then
             (( count++ )) || true
         fi
