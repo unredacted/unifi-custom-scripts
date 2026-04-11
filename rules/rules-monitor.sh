@@ -71,7 +71,12 @@ if [[ -f "$PIDFILE" ]]; then
     if [[ -n "$old_pid" ]] && kill -0 "$old_pid" 2>/dev/null; then
         echo "[rules-monitor] Killing old instance (PID $old_pid)."
         kill "$old_pid" 2>/dev/null
-        sleep 1
+        # Wait for the old process to fully exit (up to 5s) so its trap
+        # doesn't race with our FIFO creation.
+        for _i in $(seq 1 50); do
+            kill -0 "$old_pid" 2>/dev/null || break
+            sleep 0.1
+        done
     fi
     rm -f "$PIDFILE"
 fi
@@ -298,7 +303,7 @@ echo "[rules-monitor] Debounce: ${DEBOUNCE}s of silence | Log: $LOG"
 # -----------------------------------------------------------------
 _monitor() {
     echo $BASHPID > "$PIDFILE"
-    trap 'rm -f "$PIDFILE" "$LOCKFILE" /var/run/rules-monitor.fifo; kill 0 2>/dev/null; exit 0' INT TERM
+    trap 'rm -f "$PIDFILE" "$LOCKFILE"; kill 0 2>/dev/null; exit 0' INT TERM
 
     # ---- event FIFO ----
     # All event sources write trigger lines into a single FIFO.
