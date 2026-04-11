@@ -24,6 +24,7 @@
 #   ip -6 rule del ...                      — idempotent IPv6 policy rule deletion
 #   route-sync <iface> <table> [subnet]     — mirror routes on <iface> into <table>
 #                                             optional subnet filter (e.g. 23.191.200.0/24)
+#   sysctl -w <key>=<value>                  — idempotent kernel tunable ("-w" is optional)
 
 set -euo pipefail
 
@@ -166,6 +167,48 @@ run_ebtables() {
             echo "  [FAILED] $cmd"
             inc FAILED
         fi
+    fi
+}
+
+# -----------------------------------------------------------------
+# sysctl: compare current value via /proc/sys, apply only if different.
+# Supports both "sysctl -w key=value" and "sysctl key=value".
+# -----------------------------------------------------------------
+run_sysctl() {
+    local cmd="$1"
+
+    # Strip "sysctl" prefix and optional "-w" flag to get "key=value"
+    local assignment="${cmd#sysctl }"
+    assignment="${assignment#-w }"
+
+    local key="${assignment%%=*}"
+    local desired="${assignment#*=}"
+
+    # Read current value from /proc/sys (dots become slashes)
+    local proc_path="/proc/sys/${key//.//}"
+
+    if [[ -f "$proc_path" ]]; then
+        local current
+        current="$(cat "$proc_path" 2>/dev/null)" || current=""
+        # Trim whitespace for reliable comparison
+        current="$(echo "$current" | tr -d '[:space:]')"
+        local desired_trimmed
+        desired_trimmed="$(echo "$desired" | tr -d '[:space:]')"
+
+        if [[ "$current" == "$desired_trimmed" ]]; then
+            echo "  [EXISTS] $cmd (current: $current)"
+            inc EXISTED
+            return
+        fi
+    fi
+
+    # Apply via sysctl (always use -w for the write)
+    if sysctl -w "${key}=${desired}" >/dev/null 2>&1; then
+        echo "  [ADDED]  $cmd"
+        inc ADDED
+    else
+        echo "  [FAILED] $cmd"
+        inc FAILED
     fi
 }
 
@@ -467,6 +510,7 @@ while IFS= read -r line || [[ -n "$line" ]]; do
                 run_route_sync "${rs_args[1]}" "${rs_args[2]}" "${rs_args[3]:-}"
             fi
             ;;
+        sysctl\ *)                run_sysctl "$line" ;;
         *)              echo "  [SKIP]   $line" ;;
     esac
 

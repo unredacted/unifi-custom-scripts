@@ -184,6 +184,7 @@ detect_directive_types() {
             ip\ rule\ *|"ip -6 rule"\ *)    types+=("ip-rule") ;;
             ip\ route\ *|"ip -6 route"\ *)  types+=("ip-route") ;;
             route-sync\ *)         types+=("route-sync") ;;
+            sysctl\ *)             types+=("sysctl") ;;
         esac
     done < "$conf"
 
@@ -206,6 +207,25 @@ get_first_iptables_check() {
             # Strip positional arg (e.g. "-C FORWARD 1" → "-C FORWARD")
             check="$(echo "$check" | sed -E 's/(-C [A-Z]+) [0-9]+/\1/')"
             echo "$check"
+            return
+        fi
+    done < "$conf"
+}
+
+# Extract the first sysctl key=value from config (for heartbeat verification)
+get_first_sysctl_check() {
+    local conf="$1"
+
+    while IFS= read -r line; do
+        line="${line#"${line%%[![:space:]]*}"}"
+        line="${line%"${line##*[![:space:]]}"}"
+        [[ -z "$line" || "$line" == \#* ]] && continue
+
+        if [[ "$line" == sysctl\ * ]]; then
+            # Strip "sysctl" prefix and optional "-w" flag
+            local assignment="${line#sysctl }"
+            assignment="${assignment#-w }"
+            echo "$assignment"
             return
         fi
     done < "$conf"
@@ -236,12 +256,14 @@ ALL_TABLES=( $(
 WATCH_ROUTES=false
 WATCH_RULES=false
 WATCH_NETFILTER=false
+WATCH_SYSCTL=false
 
 for dtype in "${DIRECTIVE_TYPES[@]}"; do
     case "$dtype" in
         route-sync|ip-route) WATCH_ROUTES=true ;;
         ip-rule)             WATCH_RULES=true ;;
         iptables|ebtables)   WATCH_NETFILTER=true ;;
+        sysctl)              WATCH_SYSCTL=true ;;
     esac
 done
 
@@ -254,6 +276,12 @@ if $WATCH_NETFILTER; then
     IPTABLES_CHECK="$(get_first_iptables_check "$CONF")"
 fi
 
+# Build sysctl check for heartbeat verification
+SYSCTL_CHECK=""
+if $WATCH_SYSCTL; then
+    SYSCTL_CHECK="$(get_first_sysctl_check "$CONF")"
+fi
+
 echo "[rules-monitor] Host: $(hostname)"
 echo "[rules-monitor] Config: $CONF"
 echo "[rules-monitor] Directive types: ${DIRECTIVE_TYPES[*]}"
@@ -262,6 +290,7 @@ echo "[rules-monitor] Directive types: ${DIRECTIVE_TYPES[*]}"
 $WATCH_ROUTES && echo "[rules-monitor] Monitoring: ip route events"
 $WATCH_RULES && echo "[rules-monitor] Monitoring: ip rule events"
 $WATCH_NETFILTER && echo "[rules-monitor] Monitoring: netfilter heartbeat (every ${HEARTBEAT}s)"
+$WATCH_SYSCTL && echo "[rules-monitor] Monitoring: sysctl heartbeat (every ${HEARTBEAT}s)"
 echo "[rules-monitor] Debounce: ${DEBOUNCE}s of silence | Log: $LOG"
 
 # -----------------------------------------------------------------
@@ -331,6 +360,31 @@ _monitor() {
                 sleep "$HEARTBEAT"
                 if ! eval "$IPTABLES_CHECK" 2>/dev/null; then
                     echo "heartbeat: iptables rule missing" > "$fifo" 2>/dev/null || exit 0
+                fi
+            done
+        ) &
+    fi
+
+    # ---- Sysctl heartbeat ----
+    # sysctl values have no kernel event channel, so we poll.
+    # We check if the first sysctl value in the config still matches;
+    # if not, trigger a full re-inject.
+    if $WATCH_SYSCTL && [[ -n "$SYSCTL_CHECK" ]]; then
+        (
+            sleep 10  # Give initial inject time to finish
+            while true; do
+                sleep "$HEARTBEAT"
+                local key="${SYSCTL_CHECK%%=*}"
+                local desired="${SYSCTL_CHECK#*=}"
+                local proc_path="/proc/sys/${key//.//}"
+                if [[ -f "$proc_path" ]]; then
+                    local current
+                    current="$(cat "$proc_path" 2>/dev/null | tr -d '[:space:]')"
+                    local desired_trimmed
+                    desired_trimmed="$(echo "$desired" | tr -d '[:space:]')"
+                    if [[ "$current" != "$desired_trimmed" ]]; then
+                        echo "heartbeat: sysctl $key drifted ($current != $desired)" > "$fifo" 2>/dev/null || exit 0
+                    fi
                 fi
             done
         ) &
