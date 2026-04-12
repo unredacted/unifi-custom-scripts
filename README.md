@@ -113,6 +113,118 @@ Both scripts are typically called from a UniFi on-boot setup script:
 /path/to/rules/rules-monitor.sh
 ```
 
+### switch-config/ -- Remote switch CLI configuration
+
+Applies CLI commands to UniFi switches remotely via SSH + telnet. Options not exposed in the controller UI (e.g., disabling LLDP transmit on IXP ports) are applied idempotently and re-applied periodically since they do not persist across switch reboots.
+
+#### Directory layout
+
+```
+switch-config/
+  apply-switch-config.sh      # CLI injection engine (runs from management host)
+  switch-config-monitor.sh    # Background daemon for periodic re-application
+  conf/
+    example.conf              # Template config with directive reference
+    <hostname>.conf           # Per-runner-host config (git-ignored)
+```
+
+#### Configuration
+
+The scripts resolve config files using the **runner's** hostname (the machine that SSHes into switches), not the switch hostname. Resolution order (first match wins):
+
+1. Explicit path passed as `$1`
+2. `conf/$(hostname).conf`
+3. `switch-config.conf` (flat file)
+
+Per-host configs under `conf/` are git-ignored. Copy `conf/example.conf` to `conf/<hostname>.conf` and edit it for each runner host.
+
+##### Syntax
+
+```sh
+# Target switch via SSH (key auth must be pre-configured)
+switch admin@switch1.example.net
+
+  # Disable LLDP on IXP ports (range expands to 0/25 0/26 0/27 0/28)
+  interface 0/25-28
+    no lldp transmit
+
+  # Optional: verify state before/after applying
+  verify 0/28 show lldp interface 0/28  Transmit  Disabled
+```
+
+| Directive | Description |
+|---|---|
+| `switch <user@host>` | Begins a switch block. All indented lines below belong to it. |
+| `interface <port-list>` | Enter interface context. Ports can be single (`0/13`), space-separated (`0/1 0/2`), ranges (`0/13-16`), or mixed (`0/1 0/3-5`). |
+| (indented command) | CLI command run inside the interface context (e.g., `no lldp transmit`). |
+| `configure <command>` | Global configure-mode command (not interface-scoped). |
+| `verify <port> <show-cmd> <field> <expected>` | Pre/post check. If current value matches `<expected>`, the port is skipped. |
+
+Lines starting with `#` and blank lines are ignored. See `conf/example.conf` for the full directive reference and more examples.
+
+##### Example config
+
+```sh
+# Disable LLDP transmit on IXP-facing ports
+switch admin@switch1.example.net
+  interface 0/25-28
+    no lldp transmit
+  verify 0/28 show lldp interface 0/28  Transmit  Disabled
+
+# Multiple commands per interface
+switch admin@switch2.example.net
+  interface 0/1 0/2
+    no lldp transmit
+    no cdp enable
+```
+
+#### Usage
+
+**Applying switch config:**
+
+```sh
+# Uses conf/$(hostname).conf automatically
+./switch-config/apply-switch-config.sh
+
+# Specify a config explicitly
+./switch-config/apply-switch-config.sh /path/to/custom.conf
+
+# Dry run — show what would be applied without SSHing
+./switch-config/apply-switch-config.sh -n
+```
+
+The script exits non-zero if any directive fails. A file lock (`/tmp/apply-switch-config.lock`) prevents concurrent runs.
+
+**Starting the monitor daemon:**
+
+```sh
+# Default interval: 300 seconds (5 minutes)
+./switch-config/switch-config-monitor.sh
+
+# Custom interval: 600 seconds
+./switch-config/switch-config-monitor.sh 600
+
+# Or via environment variable
+INTERVAL=600 ./switch-config/switch-config-monitor.sh
+```
+
+The monitor backgrounds itself and writes its PID to `/var/run/switch-config-monitor.pid`. It kills any existing instance on startup. Logs go to `/var/log/switch-config-monitor.log`.
+
+#### Integration with on-boot scripts
+
+Both scripts are typically called from a UniFi on-boot setup script:
+
+```sh
+/path/to/switch-config/apply-switch-config.sh
+/path/to/switch-config/switch-config-monitor.sh
+```
+
+#### Requirements
+
+- Bash 4+ (for associative arrays; UniFi gateways have bash 5.x)
+- SSH key authentication pre-configured to target switches
+- The runner machine must be able to reach switches via SSH
+
 ## License
 
 GPLv3. See [LICENSE](LICENSE).

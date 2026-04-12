@@ -24,3 +24,8 @@ on-boot-commands.conf
 
 # Keep the example conf even though conf/ entries are host-specific
 !conf/example.conf
+
+# switch-config per-host configs (same pattern as rules/)
+switch-config/conf/*
+!switch-config/conf/example.conf
+switch-config/switch-config.conf
