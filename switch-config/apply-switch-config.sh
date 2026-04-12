@@ -518,8 +518,15 @@ parse_verify_field() {
     while IFS= read -r line; do
         if [[ "$line" == *"$field"* ]]; then
             local after="${line##*$field}"
-            # Strip dots (padding), colons, and whitespace to get the value
-            after="${after#"${after%%[![:.[:space:]]*}"}"
+            # Strip leading dots (padding like "Field....... Value")
+            after="${after#"${after%%[!.]*}"}"
+            # Strip leading whitespace
+            after="${after#"${after%%[![:space:]]*}"}"
+            # Strip leading colon (like "Field: Value")
+            after="${after#:}"
+            # Strip whitespace after colon
+            after="${after#"${after%%[![:space:]]*}"}"
+            # Take the first word as the value
             local value="${after%%[[:space:]]*}"
             if [[ -n "$value" ]]; then
                 echo "$value"
