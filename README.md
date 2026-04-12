@@ -148,8 +148,8 @@ switch admin@switch1.example.net
   interface 0/25-28
     no lldp transmit
 
-  # Optional: verify state before/after applying
-  verify 0/28 show lldp interface 0/28  Transmit  Disabled
+  # Optional: verify state before/after applying (checks all ports above)
+  verify-all show lldp interface  Transmit  Disabled
 ```
 
 | Directive | Description |
@@ -158,7 +158,8 @@ switch admin@switch1.example.net
 | `interface <port-list>` | Enter interface context. Ports can be single (`0/13`), space-separated (`0/1 0/2`), ranges (`0/13-16`), or mixed (`0/1 0/3-5`). |
 | (indented command) | CLI command run inside the interface context (e.g., `no lldp transmit`). |
 | `configure <command>` | Global configure-mode command (not interface-scoped). |
-| `verify <port> <show-cmd> <field> <expected>` | Pre/post check. If current value matches `<expected>`, the port is skipped. |
+| `verify <port> <show-cmd> <field> <expected>` | Pre/post check for a single port. If current value matches `<expected>`, the port is skipped. |
+| `verify-all <show-cmd-template> <field> <expected>` | Expands to a verify for every port in the preceding interface block. The port is appended to the show command template. |
 
 Lines starting with `#` and blank lines are ignored. See `conf/example.conf` for the full directive reference and more examples.
 
@@ -169,7 +170,7 @@ Lines starting with `#` and blank lines are ignored. See `conf/example.conf` for
 switch admin@switch1.example.net
   interface 0/25-28
     no lldp transmit
-  verify 0/28 show lldp interface 0/28  Transmit  Disabled
+  verify-all show lldp interface  Transmit  Disabled
 
 # Multiple commands per interface
 switch admin@switch2.example.net

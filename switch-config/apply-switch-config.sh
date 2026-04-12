@@ -131,6 +131,7 @@ parse_config() {
     local in_interface=false
     local current_ports=""
     local current_cmds=""
+    local last_flushed_ports=""
 
     while IFS= read -r line || [[ -n "$line" ]]; do
         # Preserve original for error messages
@@ -228,6 +229,44 @@ parse_config() {
                     SWITCH_VERIFIES[$current_switch]="$entry"
                 fi
 
+            elif [[ "$line" == verify-all\ * ]]; then
+                # Flush interface block if we were in one
+                if [[ "$in_interface" == true ]]; then
+                    _flush_interface_block
+                fi
+                in_interface=false
+
+                # Parse: verify-all <show-command-template> <field> <expected>
+                # Expands to a verify entry for each port in the preceding
+                # interface block. The port is appended to the show command.
+                if [[ -z "$last_flushed_ports" ]]; then
+                    echo "  [SKIP] verify-all with no preceding interface block: $orig"
+                    inc SKIPPED
+                    continue
+                fi
+
+                local vargs="${line#verify-all }"
+
+                # Expected value is the last word
+                local expected="${vargs##* }"
+                vargs="${vargs% *}"
+
+                # Field is the new last word
+                local field="${vargs##* }"
+                vargs="${vargs% *}"
+
+                # Remaining is the show command template
+                local show_template="$vargs"
+
+                for vport in $last_flushed_ports; do
+                    local entry="${vport}|${show_template} ${vport}|${field}|${expected}"
+                    if [[ -n "${SWITCH_VERIFIES[$current_switch]}" ]]; then
+                        SWITCH_VERIFIES[$current_switch]+=$'\n'"$entry"
+                    else
+                        SWITCH_VERIFIES[$current_switch]="$entry"
+                    fi
+                done
+
             elif [[ "$in_interface" == true ]]; then
                 # Command within an interface block
                 if [[ -n "$current_cmds" ]]; then
@@ -252,6 +291,7 @@ _flush_interface_block() {
     if [[ -z "$current_ports" || -z "$current_cmds" ]]; then
         return
     fi
+    last_flushed_ports="$current_ports"
     # Append as a ";;" delimited group: "ports|cmds"
     local block="${current_ports}|${current_cmds}"
     if [[ -n "${SWITCH_IFACE_DATA[$current_switch]}" ]]; then
