@@ -391,15 +391,28 @@ build_telnet_session() {
 # -----------------------------------------------------------------
 # parse_verify_field: extract a field value from telnet verify output
 #
-# Looks between MARKER_<port>_START and MARKER_<port>_END for a line
-# containing <field>, and returns the word immediately after it.
+# Looks between MARKER_<port>_START and MARKER_<port>_END for the
+# field. Handles two output formats:
+#
+#   1. Columnar table (e.g. "show lldp interface"):
+#        Interface  Link    Transmit  Receive
+#        ---------  ------  --------  --------
+#        0/16       Up      Disabled  Enabled
+#      The field is found in the header row and the value is read
+#      from the same column position in the data row.
+#
+#   2. Key-value (e.g. "Field: Value" or "Field  Value"):
+#      The value is the word immediately following the field name
+#      on the same line.
 # -----------------------------------------------------------------
 parse_verify_field() {
     local output="$1"
     local port="$2"
     local field="$3"
 
+    # Extract the section between markers
     local in_section=false
+    local section=""
     while IFS= read -r line; do
         if [[ "$line" == *"===MARKER_${port}_START==="* ]]; then
             in_section=true
@@ -409,25 +422,69 @@ parse_verify_field() {
             break
         fi
         if $in_section; then
-            # Look for the field name in this line
-            if [[ "$line" == *"$field"* ]]; then
-                # Extract the word after the field name
-                # Handle both "Field  Value" table format and "Field: Value" format
-                local after="${line##*$field}"
-                after="${after#"${after%%[![:space:]]*}"}"  # strip leading whitespace
-                after="${after%%[[:space:]]*}"              # take first word
-                after="${after#:}"                          # strip leading colon
-                after="${after#"${after%%[![:space:]]*}"}"  # strip whitespace after colon
-                if [[ -z "$after" ]]; then
-                    # Try next non-empty word if the field consumed the rest
-                    after="${line##*$field}"
-                    after="$(echo "$after" | awk '{print $1}')"
-                fi
-                echo "$after"
+            section+="$line"$'\n'
+        fi
+    done <<< "$output"
+
+    [[ -z "$section" ]] && return 1
+
+    # Strategy 1: Columnar table — field is a column header
+    # Look for a header line containing the field, followed by a
+    # separator line (dashes), followed by a data line.
+    local header_line="" separator_line="" data_line=""
+    local prev_line="" prev_prev_line=""
+    while IFS= read -r line; do
+        # A separator line is all dashes, spaces, and hyphens
+        if [[ "$line" =~ ^[[:space:]]*[-]+([[:space:]]+-+)*[[:space:]]*$ ]]; then
+            # prev_line is the header candidate
+            if [[ "$prev_line" == *"$field"* ]]; then
+                header_line="$prev_line"
+                separator_line="$line"
+                # Read the next non-empty line as data
+                while IFS= read -r data_candidate; do
+                    local trimmed="${data_candidate#"${data_candidate%%[![:space:]]*}"}"
+                    if [[ -n "$trimmed" ]]; then
+                        data_line="$data_candidate"
+                        break
+                    fi
+                done
+                break
+            fi
+        fi
+        prev_line="$line"
+    done <<< "$section"
+
+    if [[ -n "$header_line" && -n "$data_line" ]]; then
+        # Find the character offset of the field in the header
+        local before="${header_line%%$field*}"
+        local col_start=${#before}
+
+        # Extract the value from the data line at the same column
+        local data_at_col="${data_line:$col_start}"
+        # Take the first word
+        data_at_col="${data_at_col#"${data_at_col%%[![:space:]]*}"}"
+        local value="${data_at_col%%[[:space:]]*}"
+
+        if [[ -n "$value" ]]; then
+            echo "$value"
+            return 0
+        fi
+    fi
+
+    # Strategy 2: Key-value format — "Field: Value" or "Field  Value"
+    while IFS= read -r line; do
+        if [[ "$line" == *"$field"* ]]; then
+            local after="${line##*$field}"
+            # Strip colon, whitespace, take first word
+            after="${after#:}"
+            after="${after#"${after%%[![:space:]]*}"}"
+            local value="${after%%[[:space:]]*}"
+            if [[ -n "$value" ]]; then
+                echo "$value"
                 return 0
             fi
         fi
-    done <<< "$output"
+    done <<< "$section"
 
     return 1
 }
