@@ -170,7 +170,7 @@ Lines starting with `#` and blank lines are ignored. See `conf/example.conf` for
 switch admin@switch1.example.net
   interface 0/25-28
     no lldp transmit
-    spanning-tree bpdufilter enable
+    spanning-tree bpdufilter
   verify-all show lldp interface :: Transmit :: Disabled
   verify-all show spanning-tree interface :: BPDU Filter Mode :: Enabled
 

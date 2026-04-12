@@ -354,16 +354,19 @@ build_telnet_session() {
 
     if [[ "$mode" == "verify-only" ]]; then
         # Build verify-only session (show commands with markers)
+        # Uses sequential indices (MARKER_0, MARKER_1, ...) to avoid
+        # collisions when multiple verify-all directives cover the same ports.
         _add "enable"
         local verifies="${SWITCH_VERIFIES[$idx]}"
+        local vidx=0
         while IFS= read -r vline; do
             [[ -z "$vline" ]] && continue
-            local vport="${vline%%|*}"
             local rest="${vline#*|}"
             local show_cmd="${rest%%|*}"
-            _add "\"===MARKER_${vport}_START===\""
+            _add "\"===MARKER_${vidx}_START===\""
             _add "\"${show_cmd}\""
-            _add "\"===MARKER_${vport}_END===\""
+            _add "\"===MARKER_${vidx}_END===\""
+            (( vidx++ )) || true
         done <<< "$verifies"
         cmds+="sleep 1"
         echo "$cmds"
@@ -429,8 +432,9 @@ build_telnet_session() {
 # -----------------------------------------------------------------
 # parse_verify_field: extract a field value from telnet verify output
 #
-# Looks between MARKER_<port>_START and MARKER_<port>_END for the
-# field. Handles two output formats:
+# Looks between MARKER_<idx>_START and MARKER_<idx>_END for the
+# field. Uses sequential indices to avoid collisions when multiple
+# verify directives cover the same port. Handles two output formats:
 #
 #   1. Columnar table (e.g. "show lldp interface"):
 #        Interface  Link    Transmit  Receive
@@ -439,24 +443,24 @@ build_telnet_session() {
 #      The field is found in the header row and the value is read
 #      from the same column position in the data row.
 #
-#   2. Key-value (e.g. "Field: Value" or "Field  Value"):
-#      The value is the word immediately following the field name
-#      on the same line.
+#   2. Key-value (e.g. "Field...... Value"):
+#      The value is extracted after the field name and any dot/
+#      whitespace padding on the same line.
 # -----------------------------------------------------------------
 parse_verify_field() {
     local output="$1"
-    local port="$2"
+    local marker_idx="$2"
     local field="$3"
 
     # Extract the section between markers
     local in_section=false
     local section=""
     while IFS= read -r line; do
-        if [[ "$line" == *"===MARKER_${port}_START==="* ]]; then
+        if [[ "$line" == *"===MARKER_${marker_idx}_START==="* ]]; then
             in_section=true
             continue
         fi
-        if [[ "$line" == *"===MARKER_${port}_END==="* ]]; then
+        if [[ "$line" == *"===MARKER_${marker_idx}_END==="* ]]; then
             break
         fi
         if $in_section; then
@@ -509,13 +513,13 @@ parse_verify_field() {
         fi
     fi
 
-    # Strategy 2: Key-value format — "Field: Value" or "Field  Value"
+    # Strategy 2: Key-value format
+    # Handles: "Field...... Value", "Field: Value", "Field  Value"
     while IFS= read -r line; do
         if [[ "$line" == *"$field"* ]]; then
             local after="${line##*$field}"
-            # Strip colon, whitespace, take first word
-            after="${after#:}"
-            after="${after#"${after%%[![:space:]]*}"}"
+            # Strip dots (padding), colons, and whitespace to get the value
+            after="${after#"${after%%[![:.[:space:]]*}"}"
             local value="${after%%[[:space:]]*}"
             if [[ -n "$value" ]]; then
                 echo "$value"
@@ -618,7 +622,8 @@ run_switch() {
 
         local verify_output="$RUN_SSH_OUTPUT"
 
-        # Check each verify directive
+        # Check each verify directive (using sequential index for markers)
+        local vidx=0
         while IFS= read -r vline; do
             [[ -z "$vline" ]] && continue
             local vport="${vline%%|*}"
@@ -629,7 +634,7 @@ run_switch() {
             local expected="${rest#*|}"
 
             local current_val
-            if current_val=$(parse_verify_field "$verify_output" "$vport" "$field"); then
+            if current_val=$(parse_verify_field "$verify_output" "$vidx" "$field"); then
                 if [[ "$current_val" == "$expected" ]]; then
                     local cmd_desc
                     cmd_desc="$(get_iface_cmd_desc "$idx" "$vport")"
@@ -643,6 +648,7 @@ run_switch() {
                 echo "  [WARN]    Could not parse verify output for port ${vport} (field: ${field})"
                 needs_apply_ports+=" $vport"
             fi
+            (( vidx++ )) || true
         done <<< "$verifies"
 
         # For ports with interface commands but no verify, apply unconditionally
@@ -729,6 +735,7 @@ run_switch() {
             local verified=0
             local verify_failed=0
 
+            local vidx=0
             while IFS= read -r vline; do
                 [[ -z "$vline" ]] && continue
                 local vport="${vline%%|*}"
@@ -738,7 +745,10 @@ run_switch() {
                 for p in $needs_apply_ports; do
                     [[ "$p" == "$vport" ]] && was_applied=true
                 done
-                $was_applied || continue
+                if ! $was_applied; then
+                    (( vidx++ )) || true
+                    continue
+                fi
 
                 local rest="${vline#*|}"
                 local show_cmd="${rest%%|*}"
@@ -747,7 +757,7 @@ run_switch() {
                 local expected="${rest#*|}"
 
                 local current_val
-                if current_val=$(parse_verify_field "$verify_output" "$vport" "$field"); then
+                if current_val=$(parse_verify_field "$verify_output" "$vidx" "$field"); then
                     if [[ "$current_val" == "$expected" ]]; then
                         (( verified++ )) || true
                     else
@@ -758,6 +768,7 @@ run_switch() {
                     echo "  [WARN]    Could not parse post-verify for port ${vport}"
                     (( verify_failed++ )) || true
                 fi
+                (( vidx++ )) || true
             done <<< "$verifies"
 
             if [[ "$verify_failed" -eq 0 && "$verified" -gt 0 ]]; then
