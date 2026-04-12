@@ -204,23 +204,22 @@ parse_config() {
                 fi
                 in_interface=false
 
-                # Parse: verify <port> <show-command...> <field> <expected>
-                # We split from the right: last word is expected, second-to-last is field,
-                # first word after "verify" is port, everything in between is the show command.
+                # Parse: verify <port> <show-command> :: <field> :: <expected>
+                # The "::" delimiter separates the three parts, allowing
+                # multi-word field names (e.g. "BPDU Filter Mode").
                 local vargs="${line#verify }"
                 local vport="${vargs%% *}"
                 vargs="${vargs#* }"
 
-                # Expected value is the last word
-                local expected="${vargs##* }"
-                vargs="${vargs% *}"
-
-                # Field is the new last word
-                local field="${vargs##* }"
-                vargs="${vargs% *}"
-
-                # Remaining is the show command
-                local show_cmd="$vargs"
+                # Split on "::" — trim whitespace from each part
+                local show_cmd field expected
+                IFS='|' read -r show_cmd field expected <<< "${vargs// :: /|}"
+                show_cmd="${show_cmd#"${show_cmd%%[![:space:]]*}"}"
+                show_cmd="${show_cmd%"${show_cmd##*[![:space:]]}"}"
+                field="${field#"${field%%[![:space:]]*}"}"
+                field="${field%"${field##*[![:space:]]}"}"
+                expected="${expected#"${expected%%[![:space:]]*}"}"
+                expected="${expected%"${expected##*[![:space:]]}"}"
 
                 local entry="${vport}|${show_cmd}|${field}|${expected}"
                 if [[ -n "${SWITCH_VERIFIES[$current_switch]}" ]]; then
@@ -236,7 +235,7 @@ parse_config() {
                 fi
                 in_interface=false
 
-                # Parse: verify-all <show-command-template> <field> <expected>
+                # Parse: verify-all <show-command-template> :: <field> :: <expected>
                 # Expands to a verify entry for each port in the preceding
                 # interface block. The port is appended to the show command.
                 if [[ -z "$last_flushed_ports" ]]; then
@@ -247,16 +246,15 @@ parse_config() {
 
                 local vargs="${line#verify-all }"
 
-                # Expected value is the last word
-                local expected="${vargs##* }"
-                vargs="${vargs% *}"
-
-                # Field is the new last word
-                local field="${vargs##* }"
-                vargs="${vargs% *}"
-
-                # Remaining is the show command template
-                local show_template="$vargs"
+                # Split on "::" — trim whitespace from each part
+                local show_template field expected
+                IFS='|' read -r show_template field expected <<< "${vargs// :: /|}"
+                show_template="${show_template#"${show_template%%[![:space:]]*}"}"
+                show_template="${show_template%"${show_template##*[![:space:]]}"}"
+                field="${field#"${field%%[![:space:]]*}"}"
+                field="${field%"${field##*[![:space:]]}"}"
+                expected="${expected#"${expected%%[![:space:]]*}"}"
+                expected="${expected%"${expected##*[![:space:]]}"}"
 
                 for vport in $last_flushed_ports; do
                     local entry="${vport}|${show_template} ${vport}|${field}|${expected}"
