@@ -643,7 +643,7 @@ run_switch() {
             local current_val
             if current_val=$(parse_verify_field "$verify_output" "$vidx" "$field"); then
                 if [[ "$current_val" == "$expected" ]]; then
-                    echo "  [EXISTS]  interface ${vport}: ${field}: ${current_val}"
+                    echo "  [EXISTS]  interface ${vport}: ${show_cmd} — ${field}: ${current_val}"
                     inc EXISTS
                     already_ok_ports+=" $vport"
                 else
