@@ -99,8 +99,8 @@ What it watches depends on what's in the config:
 
 - **Route/route-sync directives**: `ip monitor route`, filtered to referenced interfaces and tables.
 - **ip rule directives**: `ip monitor rule` for policy rule flushes.
-- **iptables/ebtables directives**: polls every 60 seconds, checking whether a sample rule still exists.
-- **sysctl directives**: polls every 60 seconds, checking whether the first sysctl value still matches.
+- **iptables/ebtables directives**: polls every 10 seconds, checking whether a sample rule still exists.
+- **sysctl directives**: polls every 10 seconds, checking whether the first sysctl value still matches.
 
 When a relevant event fires, the monitor debounces for 5 seconds of silence (to let UBIOS finish provisioning), then runs `inject-rules.sh`. A 10-second cooldown after each inject suppresses self-triggered events.
 
@@ -198,14 +198,14 @@ The script exits non-zero if any directive fails. A file lock (`/tmp/apply-switc
 **Starting the monitor daemon:**
 
 ```sh
-# Default interval: 300 seconds (5 minutes)
+# Default interval: 30 seconds
 ./switch-config/switch-config-monitor.sh
 
-# Custom interval: 600 seconds
-./switch-config/switch-config-monitor.sh 600
+# Custom interval: 60 seconds
+./switch-config/switch-config-monitor.sh 60
 
 # Or via environment variable
-INTERVAL=600 ./switch-config/switch-config-monitor.sh
+INTERVAL=60 ./switch-config/switch-config-monitor.sh
 ```
 
 The monitor backgrounds itself and writes its PID to `/var/run/switch-config-monitor.pid`. It kills any existing instance on startup. Logs go to `/var/log/switch-config-monitor.log`.

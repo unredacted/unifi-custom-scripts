@@ -59,7 +59,7 @@ RULES_SCRIPT="${SCRIPT_DIR}/inject-rules.sh"
 PIDFILE="/var/run/rules-monitor.pid"
 DEBOUNCE=5          # seconds of silence before re-syncing
 COOLDOWN=10         # seconds after sync to suppress self-triggered events
-HEARTBEAT=60        # seconds between iptables/ebtables verification polls
+HEARTBEAT=10        # seconds between iptables/ebtables verification polls
 LOCKFILE="/var/run/rules-sync.lock"
 LOG="/var/log/rules-monitor.log"
 

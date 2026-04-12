@@ -15,7 +15,7 @@
 #   switch-config-monitor.sh [config-path] [interval-seconds]
 #
 # Environment:
-#   INTERVAL=300   — override the re-application interval (seconds)
+#   INTERVAL=30    — override the re-application interval (seconds)
 #
 # Designed to be launched from an on-boot script. Backgrounds itself
 # automatically and writes PID to /var/run/switch-config-monitor.pid.
@@ -27,13 +27,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Config file resolution: explicit arg > conf/<hostname>.conf > switch-config.conf
 if [[ -n "${1:-}" && ! "${1:-}" =~ ^[0-9]+$ ]]; then
     CONF="$1"
-    INTERVAL="${2:-${INTERVAL:-300}}"
+    INTERVAL="${2:-${INTERVAL:-30}}"
 elif [[ -f "${SCRIPT_DIR}/conf/$(hostname).conf" ]]; then
     CONF="${SCRIPT_DIR}/conf/$(hostname).conf"
-    INTERVAL="${1:-${INTERVAL:-300}}"
+    INTERVAL="${1:-${INTERVAL:-30}}"
 elif [[ -f "${SCRIPT_DIR}/switch-config.conf" ]]; then
     CONF="${SCRIPT_DIR}/switch-config.conf"
-    INTERVAL="${1:-${INTERVAL:-300}}"
+    INTERVAL="${1:-${INTERVAL:-30}}"
 else
     echo "[switch-config-monitor] No config found for host '$(hostname)'. Exiting."
     exit 1
