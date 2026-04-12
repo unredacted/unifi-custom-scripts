@@ -149,7 +149,7 @@ switch admin@switch1.example.net
     no lldp transmit
 
   # Optional: verify state before/after applying (checks all ports above)
-  verify-all show lldp interface  Transmit  Disabled
+  verify-all show lldp interface Transmit Disabled
 ```
 
 | Directive | Description |
@@ -170,7 +170,7 @@ Lines starting with `#` and blank lines are ignored. See `conf/example.conf` for
 switch admin@switch1.example.net
   interface 0/25-28
     no lldp transmit
-  verify-all show lldp interface  Transmit  Disabled
+  verify-all show lldp interface Transmit Disabled
 
 # Multiple commands per interface
 switch admin@switch2.example.net
