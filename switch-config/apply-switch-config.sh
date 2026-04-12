@@ -643,9 +643,7 @@ run_switch() {
             local current_val
             if current_val=$(parse_verify_field "$verify_output" "$vidx" "$field"); then
                 if [[ "$current_val" == "$expected" ]]; then
-                    local cmd_desc
-                    cmd_desc="$(get_iface_cmd_desc "$idx" "$vport")"
-                    echo "  [EXISTS]  interface ${vport}: ${cmd_desc:-configured} (${field}: ${current_val})"
+                    echo "  [EXISTS]  interface ${vport}: ${field}: ${current_val}"
                     inc EXISTS
                     already_ok_ports+=" $vport"
                 else
