@@ -6,7 +6,7 @@ A collection of custom scripts for UniFi OS gateways. Each subdirectory is a sel
 
 ### rules/ — Network rule injection and monitoring
 
-Applies iptables, ebtables, ip rule, ip route, sysctl, and route-sync directives idempotently from a config file. A companion daemon monitors for kernel events that indicate rules were flushed (e.g., UBIOS provisioning cycles) and re-applies them automatically.
+Applies iptables, ip6tables, ebtables, ip rule, ip route, sysctl, echo, and route-sync directives idempotently from a config file. A companion daemon monitors for kernel events that indicate rules were flushed (e.g., UBIOS provisioning cycles) and re-applies them automatically.
 
 **The problem:** UniFi OS periodically re-provisions the network stack, which flushes custom iptables rules, policy routes, routing table entries, and kernel tunables. These scripts solve that by applying rules idempotently and monitoring for flushes to restore them.
 
@@ -37,6 +37,7 @@ Per-host configs under `conf/` are git-ignored. Copy `conf/example.conf` to `con
 | Directive | Idempotency mechanism |
 |---|---|
 | `iptables <args>` | Swaps `-I`/`-A` to `-C` to check before inserting |
+| `ip6tables <args>` | Same as iptables (swaps to `-C` to check before inserting) |
 | `ebtables <args>` | Deletes with `-D` then re-adds (ebtables lacks `-C`) |
 | `ip rule add <args>` | Counts matching rules; skips if 1 exists, deduplicates if >1 |
 | `ip rule del <args>` | Deletes all copies if present, no-op if absent |
@@ -46,6 +47,7 @@ Per-host configs under `conf/` are git-ignored. Copy `conf/example.conf` to `con
 | `ip -6 route add\|del <args>` | Same as IPv4 variants |
 | `sysctl -w <key>=<value>` | Reads `/proc/sys`; writes only if value differs. `-w` is optional. |
 | `route-sync <iface> <table> [subnet]` | Mirrors routes from an interface into a routing table using `ip route replace`. Optional CIDR filter. |
+| `echo <value> > <path>` | Reads sysfs/procfs path; writes only if value differs. For VLAN sub-interfaces where sysctl fails. |
 
 Lines starting with `#` and blank lines are ignored. See `conf/example.conf` for the full directive reference and more examples.
 
@@ -62,6 +64,9 @@ route-sync vti64 100 192.0.2.0/24
 # NAT bypass for tunnel traffic
 iptables -t nat -I POSTROUTING -d 192.0.2.0/24 -j RETURN
 
+# IPv6 NAT bypass (ip6tables)
+ip6tables -t nat -I POSTROUTING -d 2001:db8::/32 -j RETURN
+
 # Block discovery broadcasts on a peering bridge
 iptables -I OUTPUT -o br3998 -p udp --dport 10001 -j DROP
 
@@ -71,6 +76,9 @@ ebtables -A OUTPUT -o br3998 -d 01:80:c2:00:00:00/ff:ff:ff:ff:ff:f0 -j DROP
 # Extend ARP/NDP reachable time on a peering bridge (4 hours)
 sysctl -w net.ipv4.neigh.br3998.base_reachable_time_ms=14400000
 sysctl -w net.ipv6.neigh.br3998.base_reachable_time_ms=14400000
+
+# Direct sysfs write (bridge ageing time — no sysctl path)
+echo 1440000 > /sys/class/net/br3998/bridge/ageing_time
 ```
 
 #### Usage
@@ -99,8 +107,9 @@ What it watches depends on what's in the config:
 
 - **Route/route-sync directives**: `ip monitor route`, filtered to referenced interfaces and tables.
 - **ip rule directives**: `ip monitor rule` for policy rule flushes.
-- **iptables/ebtables directives**: polls every 10 seconds, checking whether a sample rule still exists.
+- **iptables/ip6tables/ebtables directives**: polls every 10 seconds, checking whether a sample rule still exists.
 - **sysctl directives**: polls every 10 seconds, checking whether the first sysctl value still matches.
+- **echo directives**: polls every 10 seconds, checking whether a sample sysfs/procfs value still matches.
 
 When a relevant event fires, the monitor debounces for 5 seconds of silence (to let UBIOS finish provisioning), then runs `inject-rules.sh`. A 10-second cooldown after each inject suppresses self-triggered events.
 

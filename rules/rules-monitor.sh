@@ -185,11 +185,13 @@ detect_directive_types() {
 
         case "$line" in
             iptables\ *)           types+=("iptables") ;;
+            ip6tables\ *)          types+=("ip6tables") ;;
             ebtables\ *)           types+=("ebtables") ;;
             ip\ rule\ *|"ip -6 rule"\ *)    types+=("ip-rule") ;;
             ip\ route\ *|"ip -6 route"\ *)  types+=("ip-route") ;;
             route-sync\ *)         types+=("route-sync") ;;
             sysctl\ *)             types+=("sysctl") ;;
+            echo\ *\>\ *)          types+=("echo") ;;
         esac
     done < "$conf"
 
@@ -205,7 +207,7 @@ get_first_iptables_check() {
         line="${line%"${line##*[![:space:]]}"}"
         [[ -z "$line" || "$line" == \#* ]] && continue
 
-        if [[ "$line" == iptables\ * ]]; then
+        if [[ "$line" == iptables\ * || "$line" == ip6tables\ * ]]; then
             # Convert -I/-A to -C for check
             local check="${line/-I /-C }"
             check="${check/-A /-C }"
@@ -231,6 +233,29 @@ get_first_sysctl_check() {
             local assignment="${line#sysctl }"
             assignment="${assignment#-w }"
             echo "$assignment"
+            return
+        fi
+    done < "$conf"
+}
+
+# Extract the first echo value|path from config (for heartbeat verification)
+get_first_echo_check() {
+    local conf="$1"
+
+    while IFS= read -r line; do
+        line="${line#"${line%%[![:space:]]*}"}"
+        line="${line%"${line##*[![:space:]]}"}"
+        [[ -z "$line" || "$line" == \#* ]] && continue
+
+        if [[ "$line" == echo\ *\>\ * ]]; then
+            # Parse: echo <value> > <path>
+            local rest="${line#echo }"
+            local value="${rest%% > *}"
+            local path="${rest#* > }"
+            value="$(echo "$value" | tr -d '[:space:]')"
+            path="$(echo "$path" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+            # Return as "value|path" (pipe cannot appear in sysfs/procfs paths)
+            echo "${value}|${path}"
             return
         fi
     done < "$conf"
@@ -262,13 +287,15 @@ WATCH_ROUTES=false
 WATCH_RULES=false
 WATCH_NETFILTER=false
 WATCH_SYSCTL=false
+WATCH_ECHO=false
 
 for dtype in "${DIRECTIVE_TYPES[@]}"; do
     case "$dtype" in
         route-sync|ip-route) WATCH_ROUTES=true ;;
         ip-rule)             WATCH_RULES=true ;;
-        iptables|ebtables)   WATCH_NETFILTER=true ;;
+        iptables|ip6tables|ebtables)   WATCH_NETFILTER=true ;;
         sysctl)              WATCH_SYSCTL=true ;;
+        echo)                WATCH_ECHO=true ;;
     esac
 done
 
@@ -287,6 +314,12 @@ if $WATCH_SYSCTL; then
     SYSCTL_CHECK="$(get_first_sysctl_check "$CONF")"
 fi
 
+# Build echo check for heartbeat verification
+ECHO_CHECK=""
+if $WATCH_ECHO; then
+    ECHO_CHECK="$(get_first_echo_check "$CONF")"
+fi
+
 echo "[rules-monitor] Host: $(hostname)"
 echo "[rules-monitor] Config: $CONF"
 echo "[rules-monitor] Directive types: ${DIRECTIVE_TYPES[*]}"
@@ -296,6 +329,7 @@ $WATCH_ROUTES && echo "[rules-monitor] Monitoring: ip route events"
 $WATCH_RULES && echo "[rules-monitor] Monitoring: ip rule events"
 $WATCH_NETFILTER && echo "[rules-monitor] Monitoring: netfilter heartbeat (every ${HEARTBEAT}s)"
 $WATCH_SYSCTL && echo "[rules-monitor] Monitoring: sysctl heartbeat (every ${HEARTBEAT}s)"
+$WATCH_ECHO && echo "[rules-monitor] Monitoring: echo heartbeat (every ${HEARTBEAT}s)"
 echo "[rules-monitor] Debounce: ${DEBOUNCE}s of silence | Log: $LOG"
 
 # -----------------------------------------------------------------
@@ -389,6 +423,28 @@ _monitor() {
                     desired_trimmed="$(echo "$desired" | tr -d '[:space:]')"
                     if [[ "$current" != "$desired_trimmed" ]]; then
                         echo "heartbeat: sysctl $key drifted ($current != $desired)" > "$fifo" 2>/dev/null || exit 0
+                    fi
+                fi
+            done
+        ) &
+    fi
+
+    # ---- Echo (sysfs/procfs) heartbeat ----
+    # echo writes have no kernel event channel, so we poll.
+    # We check if the first echo path in the config still contains the
+    # expected value; if not, trigger a full re-inject.
+    if $WATCH_ECHO && [[ -n "$ECHO_CHECK" ]]; then
+        (
+            sleep 10  # Give initial inject time to finish
+            while true; do
+                sleep "$HEARTBEAT"
+                local value="${ECHO_CHECK%%|*}"
+                local path="${ECHO_CHECK#*|}"
+                if [[ -f "$path" ]]; then
+                    local current
+                    current="$(cat "$path" 2>/dev/null | tr -d '[:space:]')"
+                    if [[ "$current" != "$value" ]]; then
+                        echo "heartbeat: echo $path drifted ($current != $value)" > "$fifo" 2>/dev/null || exit 0
                     fi
                 fi
             done

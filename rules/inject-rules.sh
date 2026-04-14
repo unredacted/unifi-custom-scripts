@@ -13,6 +13,7 @@
 #
 # Supported directives:
 #   iptables ...                            — idempotent iptables rule insertion
+#   ip6tables ...                           — idempotent ip6tables rule insertion (uses same -C check)
 #   ebtables ...                            — idempotent ebtables rule insertion
 #   ip rule add ...                         — idempotent policy rule insertion
 #   ip rule del ...                         — idempotent policy rule deletion
@@ -25,6 +26,7 @@
 #   route-sync <iface> <table> [subnet]     — mirror routes on <iface> into <table>
 #                                             optional subnet filter (e.g. 23.191.200.0/24)
 #   sysctl -w <key>=<value>                  — idempotent kernel tunable ("-w" is optional)
+#   echo <value> > <path>                   — idempotent sysfs/procfs write (read-compare-write)
 
 set -euo pipefail
 
@@ -204,6 +206,52 @@ run_sysctl() {
 
     # Apply via sysctl (always use -w for the write)
     if sysctl -w "${key}=${desired}" >/dev/null 2>&1; then
+        echo "  [ADDED]  $cmd"
+        inc ADDED
+    else
+        echo "  [FAILED] $cmd"
+        inc FAILED
+    fi
+}
+
+# -----------------------------------------------------------------
+# echo VALUE > PATH: compare current value, write only if different.
+# Used for sysfs/procfs tunables where sysctl fails (VLAN
+# sub-interfaces with dots in names that sysctl misparses).
+# -----------------------------------------------------------------
+run_echo() {
+    local cmd="$1"
+
+    # Parse: echo <value> > <path>
+    # Strip "echo " prefix, then split on " > "
+    local rest="${cmd#echo }"
+    local value="${rest%% > *}"
+    local path="${rest#* > }"
+
+    # Trim whitespace from value and path
+    value="$(echo "$value" | tr -d '[:space:]')"
+    path="$(echo "$path" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+
+    if [[ -z "$value" || -z "$path" ]]; then
+        echo "  [SKIP]   $cmd (could not parse value/path)"
+        inc SKIPPED
+        return
+    fi
+
+    if [[ -f "$path" ]]; then
+        local current
+        current="$(cat "$path" 2>/dev/null)" || current=""
+        current="$(echo "$current" | tr -d '[:space:]')"
+
+        if [[ "$current" == "$value" ]]; then
+            echo "  [EXISTS] $cmd (current: $current)"
+            inc EXISTED
+            return
+        fi
+    fi
+
+    # Write the value
+    if echo "$value" > "$path" 2>/dev/null; then
         echo "  [ADDED]  $cmd"
         inc ADDED
     else
@@ -488,6 +536,7 @@ while IFS= read -r line || [[ -n "$line" ]]; do
 
     case "$line" in
         iptables\ *)              run_iptables "$line" ;;
+        ip6tables\ *)             run_iptables "$line" ;;
         ebtables\ *)              run_ebtables "$line" ;;
         "ip -6 rule add"\ *)     run_ip_rule "$line" ;;
         "ip -6 rule del"\ *)     run_ip_rule_del "$line" ;;
@@ -511,6 +560,7 @@ while IFS= read -r line || [[ -n "$line" ]]; do
             fi
             ;;
         sysctl\ *)                run_sysctl "$line" ;;
+        echo\ *\>\ *)            run_echo "$line" ;;
         *)              echo "  [SKIP]   $line" ;;
     esac
 
