@@ -1,21 +1,26 @@
 #!/bin/bash
-# ---- Apply Arping Wrapper ----
+# ---- Apply Neighbor-Poll Wrapper ----
 #
 # UBIOS's ubios-udapi-server runs an `nl-neighbors-poll` subsystem that
-# watches the kernel neighbor cache and calls `arping -I <bridge> <ip>`
-# for every entry, on a short periodic cycle.  On an IXP peering fabric
-# this produces a continuous broadcast ARP storm that violates IX
-# policy (AMS-IX / SIX require 4-hour ARP cache timeout).
+# watches the kernel neighbor cache and shells out to small probe tools
+# for every entry, on a short periodic cycle:
 #
-# There is no config switch to disable the behavior.  The surgical fix
-# is to interpose a wrapper over /usr/sbin/arping that silently returns
-# success (exit 0) when invoked on an IXP bridge, while still passing
-# all other invocations through to the real binary.  The kernel's own
-# NUD handles real reachability on the IXP via BGP dst_confirm(), so
-# no functionality is lost.
+#   IPv4: /usr/sbin/arping -q -c 2 -w 3 -I <bridge> <ip>
+#   IPv6: /usr/bin/ndisc6  [opts] <ipv6> <bridge>
 #
-# The wrapper is installed via bind-mount to avoid modifying the real
-# /usr/sbin/arping — unmounting restores the original behavior.
+# On an IXP peering fabric this produces a continuous broadcast ARP and
+# multicast NS storm that violates IX policy (AMS-IX / SIX require a
+# 4-hour ARP/ND cache timeout).
+#
+# There is no config switch to disable the behavior in ubios-udapi-server.
+# The surgical fix is to interpose a wrapper over each probe binary that
+# silently returns success (exit 0) when invoked with an IXP bridge
+# anywhere in its arguments.  All other invocations pass through to the
+# real binary unchanged.  The kernel's own NUD handles real reachability
+# on the IXP via BGP dst_confirm(), so no functionality is lost.
+#
+# The wrappers are installed via bind-mount to avoid modifying the real
+# binaries — unmounting restores original behavior.
 #
 # Config file format (one interface name per line, comments with #):
 #   br3996
@@ -26,30 +31,36 @@
 # Config resolution (first match wins):
 #   1. Explicit argument:              $1
 #   2. Per-host conf:                  conf/$(hostname).conf
-#   3. Flat preferred:                 arping-wrapper.conf
+#   3. Flat preferred:                 neighbor-poll-wrapper.conf
 #
 # Usage:
-#   apply-arping-wrapper.sh [config-path]
-#   apply-arping-wrapper.sh --uninstall    # remove bind-mount only
+#   apply-neighbor-poll-wrapper.sh [config-path]
+#   apply-neighbor-poll-wrapper.sh --uninstall    # remove all bind-mounts only
 
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-WRAPPER_DIR="/data/ix-arping-wrapper"
-WRAPPER_BIN="${WRAPPER_DIR}/arping"
-WRAPPER_REAL="${WRAPPER_DIR}/arping.real"
-TARGET="/usr/sbin/arping"
+WRAPPER_DIR="/data/ix-neighbor-poll-wrapper"
+
+# Probe binaries to wrap.  Add more here if ubios-udapi-server starts
+# using additional tools (e.g. rdisc6, ping6, ndppd).
+TARGETS=(
+    "/usr/sbin/arping"
+    "/usr/bin/ndisc6"
+)
 
 # -----------------------------------------------------------------
-# Uninstall mode — unmount the wrapper, restore original behavior
+# Uninstall mode — unmount every wrapper, restore original behavior
 # -----------------------------------------------------------------
 if [[ "${1:-}" == "--uninstall" ]]; then
-    if mount | grep -q " on ${TARGET} "; then
-        umount "${TARGET}"
-        echo "[arping-wrapper] Unmounted wrapper from ${TARGET}"
-    else
-        echo "[arping-wrapper] No wrapper mount found at ${TARGET}"
-    fi
+    for target in "${TARGETS[@]}"; do
+        if mount | grep -q " on ${target} "; then
+            umount "${target}"
+            echo "[neighbor-poll-wrapper] Unmounted wrapper from ${target}"
+        else
+            echo "[neighbor-poll-wrapper] No wrapper mount found at ${target}"
+        fi
+    done
     exit 0
 fi
 
@@ -60,18 +71,18 @@ if [[ -n "${1:-}" ]]; then
     CONF="$1"
 elif [[ -f "${SCRIPT_DIR}/conf/$(hostname).conf" ]]; then
     CONF="${SCRIPT_DIR}/conf/$(hostname).conf"
-elif [[ -f "${SCRIPT_DIR}/arping-wrapper.conf" ]]; then
-    CONF="${SCRIPT_DIR}/arping-wrapper.conf"
+elif [[ -f "${SCRIPT_DIR}/neighbor-poll-wrapper.conf" ]]; then
+    CONF="${SCRIPT_DIR}/neighbor-poll-wrapper.conf"
 else
-    echo "[arping-wrapper] No config found for host '$(hostname)'."
-    echo "                 Looked for:"
-    echo "                   ${SCRIPT_DIR}/conf/$(hostname).conf"
-    echo "                   ${SCRIPT_DIR}/arping-wrapper.conf"
+    echo "[neighbor-poll-wrapper] No config found for host '$(hostname)'."
+    echo "                        Looked for:"
+    echo "                          ${SCRIPT_DIR}/conf/$(hostname).conf"
+    echo "                          ${SCRIPT_DIR}/neighbor-poll-wrapper.conf"
     exit 1
 fi
 
 if [[ ! -f "${CONF}" ]]; then
-    echo "[arping-wrapper] Config file not found: ${CONF}"
+    echo "[neighbor-poll-wrapper] Config file not found: ${CONF}"
     exit 1
 fi
 
@@ -88,12 +99,12 @@ while IFS= read -r line || [[ -n "$line" ]]; do
 done < "${CONF}"
 
 if [[ ${#INTERFACES[@]} -eq 0 ]]; then
-    echo "[arping-wrapper] No interfaces in config: ${CONF}"
+    echo "[neighbor-poll-wrapper] No interfaces in config: ${CONF}"
     exit 1
 fi
 
-echo "[arping-wrapper] Config: ${CONF}"
-echo "[arping-wrapper] Interfaces to skip: ${INTERFACES[*]}"
+echo "[neighbor-poll-wrapper] Config: ${CONF}"
+echo "[neighbor-poll-wrapper] Interfaces to skip: ${INTERFACES[*]}"
 
 # -----------------------------------------------------------------
 # Build the wrapper case-pattern from the interface list
@@ -107,63 +118,90 @@ for iface in "${INTERFACES[@]}"; do
     fi
 done
 
-# -----------------------------------------------------------------
-# Install the wrapper and its backup of the real binary
-# -----------------------------------------------------------------
 mkdir -p "${WRAPPER_DIR}"
 
-# Copy the real binary (only if it's not already our wrapper and the
-# backup doesn't exist yet) — the bind-mount makes ls see the wrapper,
-# so we check via the mount table.
-if ! mount | grep -q " on ${TARGET} "; then
-    if [[ ! -f "${WRAPPER_REAL}" ]]; then
-        cp "${TARGET}" "${WRAPPER_REAL}"
-        echo "[arping-wrapper] Saved real binary: ${WRAPPER_REAL}"
-    fi
-fi
+# -----------------------------------------------------------------
+# install_wrapper: install one bind-mount wrapper
+#
+# Args:
+#   $1 — full path to the real binary (e.g. /usr/sbin/arping)
+# -----------------------------------------------------------------
+install_wrapper() {
+    local target="$1"
+    local name
+    name="$(basename "$target")"
+    local wrapper_bin="${WRAPPER_DIR}/${name}"
+    local wrapper_real="${WRAPPER_DIR}/${name}.real"
 
-# Write (or refresh) the wrapper script.  We always rewrite so the
-# interface list stays in sync with the config file.
-cat > "${WRAPPER_BIN}" <<WRAPPER
+    if [[ ! -e "$target" ]]; then
+        echo "[neighbor-poll-wrapper] ${target} not present on this system, skipping."
+        return 0
+    fi
+
+    # Save the real binary if we haven't already.  Use the mount table
+    # to detect "already wrapped" — if mounted, ${target} is the wrapper.
+    if ! mount | grep -q " on ${target} "; then
+        if [[ ! -f "$wrapper_real" ]]; then
+            cp "$target" "$wrapper_real"
+            echo "[neighbor-poll-wrapper] Saved real binary: ${wrapper_real}"
+        fi
+    fi
+
+    # Always rewrite the wrapper so the interface list stays in sync
+    # with the config file.  We match if ANY argument equals an IX
+    # bridge name — covers both arping (-I <iface>) and ndisc6
+    # (positional <iface> at end), plus any future tool that takes an
+    # interface as a bare argument.
+    cat > "$wrapper_bin" <<WRAPPER
 #!/bin/bash
-# Auto-generated by apply-arping-wrapper.sh — do not edit by hand.
+# Auto-generated by apply-neighbor-poll-wrapper.sh — do not edit by hand.
+# Wraps: ${target}
 # Interfaces skipped: ${INTERFACES[*]}
 #
-# We silently exit 0 for IX interfaces so ubios-udapi-server's
-# nl-neighbors-poll believes its arping succeeded.  The kernel's own
-# NUD handles real reachability via BGP dst_confirm().
-args=("\$@")
-for ((i=0; i<\${#args[@]}; i++)); do
-    if [[ "\${args[i]}" == "-I" && \$((i+1)) -lt \${#args[@]} ]]; then
-        case "\${args[i+1]}" in
-            ${CASE_PATTERN}) exit 0 ;;
-        esac
-    fi
+# Returns 0 (success) if any argument matches an IX bridge so the
+# caller (typically ubios-udapi-server's nl-neighbors-poll) believes
+# the probe succeeded.  Kernel NUD handles real reachability via BGP
+# dst_confirm() so no functionality is lost on the IXP fabric.
+for arg in "\$@"; do
+    case "\$arg" in
+        ${CASE_PATTERN}) exit 0 ;;
+    esac
 done
-exec "${WRAPPER_REAL}" "\$@"
+exec "${wrapper_real}" "\$@"
 WRAPPER
-chmod +x "${WRAPPER_BIN}"
-echo "[arping-wrapper] Installed wrapper: ${WRAPPER_BIN}"
+    chmod +x "$wrapper_bin"
+    echo "[neighbor-poll-wrapper] Installed wrapper: ${wrapper_bin}"
+
+    # Apply the bind-mount (idempotent)
+    if mount | grep -q " on ${target} "; then
+        echo "[neighbor-poll-wrapper] Wrapper already bind-mounted at ${target}"
+    else
+        mount --bind "$wrapper_bin" "$target"
+        echo "[neighbor-poll-wrapper] Bind-mounted ${wrapper_bin} -> ${target}"
+    fi
+
+    if ! mount | grep -q " on ${target} "; then
+        echo "[neighbor-poll-wrapper] ERROR: bind-mount did not take effect for ${target}"
+        return 1
+    fi
+
+    local size real_size
+    size=$(stat -c %s "$target")
+    real_size=$(stat -c %s "$wrapper_real" 2>/dev/null || echo "?")
+    echo "[neighbor-poll-wrapper] ${target} is now ${size} bytes (real binary is ${real_size})."
+}
 
 # -----------------------------------------------------------------
-# Apply the bind-mount (idempotent — if already mounted, skip)
+# Install all wrappers
 # -----------------------------------------------------------------
-if mount | grep -q " on ${TARGET} "; then
-    echo "[arping-wrapper] Wrapper already bind-mounted at ${TARGET}"
-else
-    mount --bind "${WRAPPER_BIN}" "${TARGET}"
-    echo "[arping-wrapper] Bind-mounted ${WRAPPER_BIN} -> ${TARGET}"
-fi
+fail=0
+for target in "${TARGETS[@]}"; do
+    install_wrapper "$target" || fail=1
+done
 
-# -----------------------------------------------------------------
-# Verify
-# -----------------------------------------------------------------
-if ! mount | grep -q " on ${TARGET} "; then
-    echo "[arping-wrapper] ERROR: bind-mount did not take effect."
+if [[ "$fail" -ne 0 ]]; then
+    echo "[neighbor-poll-wrapper] One or more wrappers failed to install."
     exit 1
 fi
 
-size=$(stat -c %s "${TARGET}")
-real_size=$(stat -c %s "${WRAPPER_REAL}" 2>/dev/null || echo "?")
-echo "[arping-wrapper] ${TARGET} is now ${size} bytes (real binary is ${real_size})."
-echo "[arping-wrapper] Active."
+echo "[neighbor-poll-wrapper] Active."
