@@ -383,7 +383,8 @@ build_telnet_session() {
         # Split by ";;" into blocks
         local IFS_SAVE="$IFS"
         local blocks
-        IFS='@' read -ra blocks <<< "${iface_data//;;/@}"
+        # -d '' keeps embedded newlines; default read would stop at first \n and drop later commands in a block.
+        IFS='@' read -d '' -ra blocks <<< "${iface_data//;;/@}" || true
         IFS="$IFS_SAVE"
 
         for block in "${blocks[@]}"; do
@@ -550,7 +551,7 @@ get_all_iface_ports() {
 
     local IFS_SAVE="$IFS"
     local blocks
-    IFS='@' read -ra blocks <<< "${iface_data//;;/@}"
+    IFS='@' read -d '' -ra blocks <<< "${iface_data//;;/@}" || true
     IFS="$IFS_SAVE"
 
     for block in "${blocks[@]}"; do
@@ -577,7 +578,7 @@ get_iface_cmd_desc() {
 
     local IFS_SAVE="$IFS"
     local blocks
-    IFS='@' read -ra blocks <<< "${iface_data//;;/@}"
+    IFS='@' read -d '' -ra blocks <<< "${iface_data//;;/@}" || true
     IFS="$IFS_SAVE"
 
     for block in "${blocks[@]}"; do
