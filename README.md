@@ -237,6 +237,73 @@ Both scripts are typically called from a UniFi on-boot setup script:
 - SSH key authentication pre-configured to target switches
 - The runner machine must be able to reach switches via SSH
 
+### lib/ — Shared infrastructure (monitor watchdog)
+
+A cron-invoked supervisor that watches every per-subsystem monitor in
+this repo and restarts any that have died or stalled.
+
+**The problem it solves:** the monitors in `rules/`,
+`switch-config/`, and `neighbor-poll-wrapper/` all background
+themselves once at boot from `/data/on_boot.d` and then run forever
+(in theory). In practice, log evidence on at least one production
+gateway shows individual monitors going silent for hours at a time —
+PID still valid, no error, no restart sequence — consistent with the
+process being `SIGSTOP`'d by some UBIOS subsystem during config sync
+and later `SIGCONT`'d. While stopped, the monitor doesn't run its
+apply cycle, the wrapper bind-mount can drift off, and the IX fabric
+sees a storm.
+
+**The fix:** an external supervisor that lives in cron's process tree
+(not ours) and detects "stuck" via heartbeat-file mtime, not just
+"dead" via PID liveness. `SIGTERM` cannot be delivered to a stopped
+process; the watchdog uses `SIGKILL` and re-launches via the
+monitor's own start script.
+
+#### Layout
+
+```
+lib/
+  monitor-watchdog.sh                 # the supervisor
+  install-monitor-watchdog-cron.sh    # idempotent cron installer
+  monitors.conf                       # registry of supervised monitors
+```
+
+#### Registry format
+
+`monitors.conf` is whitespace-separated, one row per monitor:
+
+```
+<name>  <pidfile>  <heartbeat-file>  <max_silence_sec>  <launcher-path>
+```
+
+Each in-repo monitor writes its PID to `/var/run/<name>.pid` and
+touches `/var/run/<name>.heartbeat` on every loop iteration (or on a
+dedicated 10s ticker for event-driven monitors). The watchdog checks
+both — PID alive AND heartbeat younger than `max_silence_sec` — and
+restarts on either failure.
+
+#### Installation
+
+The cron entry is installed via the `install-monitor-watchdog-cron.sh`
+script (idempotent — uses a sentinel comment in
+`/etc/cron.d/unifi-scripts-monitor-watchdog`). Ansible runs this
+once per playbook apply.
+
+```sh
+./lib/install-monitor-watchdog-cron.sh           # install/update
+./lib/install-monitor-watchdog-cron.sh --remove  # uninstall
+```
+
+#### Worst-case detection latency
+
+`max_silence_sec` (typically 60-90s) + 60s cron tick = ~2 minutes
+worst case. Versus the unbounded gap with no supervisor (we observed
+2.5 hours in production), this is a 75× improvement.
+
+A future migration to systemd units with `WatchdogSec=` would bring
+this under 10 seconds, but cron is the lowest-friction path that
+works on every UBIOS version we've tested.
+
 ## License
 
 GPLv3. See [LICENSE](LICENSE).

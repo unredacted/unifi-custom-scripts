@@ -62,6 +62,14 @@ COOLDOWN=10         # seconds after sync to suppress self-triggered events
 HEARTBEAT=10        # seconds between iptables/ebtables verification polls
 LOCKFILE="/var/run/rules-sync.lock"
 LOG="/var/log/rules-monitor.log"
+# Touched every HEARTBEAT seconds by a dedicated subprocess (added
+# below); lib/monitor-watchdog.sh reads its mtime to detect a stuck
+# monitor (PID alive but not making progress, e.g. SIGSTOP'd by UBIOS
+# during config-sync).  We use a separate ticker rather than wedging
+# into the existing netfilter/sysctl/echo heartbeat loops because
+# those are conditional on what's in the config — a host with only
+# `ip rule` directives wouldn't fire any of them.
+HEARTBEAT_FILE="/var/run/rules-monitor.heartbeat"
 
 # -----------------------------------------------------------------
 # Prevent duplicate instances — kill any existing monitor
@@ -450,6 +458,19 @@ _monitor() {
             done
         ) &
     fi
+
+    # ---- Watchdog heartbeat ticker ----
+    # Unconditional: fires regardless of whether netfilter/sysctl/echo
+    # heartbeats are enabled.  If this loop stops touching the file —
+    # because the parent is SIGSTOP'd, the bash interpreter is wedged,
+    # or this whole subshell got killed — lib/monitor-watchdog.sh sees
+    # a stale mtime within max_silence_sec and restarts the monitor.
+    (
+        while true; do
+            : > "$HEARTBEAT_FILE"
+            sleep "$HEARTBEAT"
+        done
+    ) &
 
     # ---- Main debounce loop ----
     # Open persistent FDs on the FIFO:
