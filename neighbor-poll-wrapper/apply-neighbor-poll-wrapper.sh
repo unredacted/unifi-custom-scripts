@@ -172,12 +172,32 @@ WRAPPER
     chmod +x "$wrapper_bin"
     echo "[neighbor-poll-wrapper] Installed wrapper: ${wrapper_bin}"
 
-    # Apply the bind-mount (idempotent)
+    # Apply the bind-mount (idempotent).
+    #
+    # If the mount was previously established and has since disappeared,
+    # UBIOS (or some other process) removed it.  This is a critical
+    # event: between unmount and re-mount, the real arping/ndisc6
+    # binary is exposed and ubios-udapi-server's nl-neighbors-poll can
+    # fire a full peer-sweep that the IX NOC will see (44 calls/min on
+    # a single IXP bridge has been measured in the wild).  Log it
+    # LOUDLY and also send to syslog so the event is easy to correlate
+    # with other UBIOS events via journalctl.
     if mount | grep -q " on ${target} "; then
         echo "[neighbor-poll-wrapper] Wrapper already bind-mounted at ${target}"
     else
+        # Differentiate first-install from recovery: if the wrapper has
+        # ever been mounted here (evidenced by the .real file existing
+        # and being populated), this is a re-mount after loss.
+        local alert_prefix="Bind-mounted"
+        if [[ -f "${wrapper_real}" ]] && [[ -s "${wrapper_real}" ]]; then
+            alert_prefix="!!! MOUNT LOST !!! restoring"
+            echo "[neighbor-poll-wrapper] $(date -u +%Y-%m-%dT%H:%M:%SZ) ${alert_prefix}: ${target}"
+            logger -t neighbor-poll-wrapper -p daemon.warning \
+                "MOUNT LOST: ${target} was unmounted; restoring wrapper bind-mount. IX peers may have been exposed to nl-neighbors-poll." \
+                2>/dev/null || true
+        fi
         mount --bind "$wrapper_bin" "$target"
-        echo "[neighbor-poll-wrapper] Bind-mounted ${wrapper_bin} -> ${target}"
+        echo "[neighbor-poll-wrapper] ${alert_prefix}: ${wrapper_bin} -> ${target}"
     fi
 
     if ! mount | grep -q " on ${target} "; then
