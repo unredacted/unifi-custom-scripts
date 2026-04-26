@@ -43,6 +43,10 @@ fi
 APPLY_SCRIPT="${SCRIPT_DIR}/apply-neighbor-poll-wrapper.sh"
 PIDFILE="/var/run/neighbor-poll-wrapper-monitor.pid"
 LOG="/var/log/neighbor-poll-wrapper-monitor.log"
+# Touched at the top of every loop iteration; lib/monitor-watchdog.sh
+# uses its mtime to detect a stuck process (PID alive but not making
+# progress, e.g. SIGSTOP'd by UBIOS during config-sync).
+HEARTBEAT_FILE="/var/run/neighbor-poll-wrapper-monitor.heartbeat"
 
 # -----------------------------------------------------------------
 # Prevent duplicate instances — kill any existing monitor
@@ -73,6 +77,12 @@ _monitor() {
     trap 'rm -f "$PIDFILE"; kill 0 2>/dev/null; exit 0' INT TERM
 
     while true; do
+        # Heartbeat for lib/monitor-watchdog.sh — touched before any
+        # work so a stalled apply-script still keeps the watchdog calm
+        # (the watchdog only restarts us if the heartbeat itself stops
+        # advancing, which means our loop body is hung or we're stopped).
+        : > "$HEARTBEAT_FILE"
+
         echo "[$(date)] Running $APPLY_SCRIPT" >> "$LOG"
         "$APPLY_SCRIPT" "$CONF" >> "$LOG" 2>&1 || true
         echo "[$(date)] Next run in ${INTERVAL}s" >> "$LOG"
